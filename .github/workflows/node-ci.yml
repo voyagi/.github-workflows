@@ -1,0 +1,54 @@
+name: Node.js CI
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: "Node.js version"
+        type: string
+        default: "22"
+      run-build:
+        description: "Run build step (npm run build)"
+        type: boolean
+        default: false
+      run-tests:
+        description: "Run test suite (npm test)"
+        type: boolean
+        default: false
+      run-trivy:
+        description: "Run Trivy dependency scan"
+        type: boolean
+        default: false
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Biome check
+        run: npx biome check .
+
+      - name: Build
+        if: ${{ inputs.run-build }}
+        run: npm run build
+
+      - name: Test
+        if: ${{ inputs.run-tests }}
+        run: npm test
+
+      - name: Trivy security scan
+        if: ${{ inputs.run-trivy }}
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
