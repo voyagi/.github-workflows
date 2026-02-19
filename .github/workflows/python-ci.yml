@@ -1,0 +1,72 @@
+name: Python CI
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: "Python version"
+        type: string
+        default: "3.12"
+      requirements-file:
+        description: "Main requirements file"
+        type: string
+        default: "requirements.txt"
+      dev-requirements-file:
+        description: "Dev requirements file (leave empty to skip)"
+        type: string
+        default: ""
+      run-tests:
+        description: "Run pytest"
+        type: boolean
+        default: false
+      run-mypy:
+        description: "Run mypy type checking"
+        type: boolean
+        default: false
+      run-trivy:
+        description: "Run Trivy dependency scan"
+        type: boolean
+        default: false
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r ${{ inputs.requirements-file }}
+          pip install ruff
+
+      - name: Install dev dependencies
+        if: ${{ inputs.dev-requirements-file != '' }}
+        run: pip install -r ${{ inputs.dev-requirements-file }}
+
+      - name: Ruff check
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Mypy
+        if: ${{ inputs.run-mypy }}
+        run: mypy .
+
+      - name: Pytest
+        if: ${{ inputs.run-tests }}
+        run: pytest
+
+      - name: Trivy security scan
+        if: ${{ inputs.run-trivy }}
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
