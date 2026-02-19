@@ -15,6 +15,10 @@ on:
         description: "Run test suite (npm test)"
         type: boolean
         default: false
+      run-biome:
+        description: "Run Biome lint and format check"
+        type: boolean
+        default: true
       run-trivy:
         description: "Run Trivy dependency scan"
         type: boolean
@@ -35,6 +39,7 @@ jobs:
       - run: npm ci
 
       - name: Biome check
+        if: ${{ inputs.run-biome }}
         run: npx biome check .
 
       - name: Build

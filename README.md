@@ -2,17 +2,15 @@
 
 Reusable GitHub Actions workflows for all voyagi repos.
 
+## Quick Start
+
+Create `.github/workflows/ci.yml` in your repo with one of the examples below.
+
 ## Available Workflows
 
 ### node-ci.yml
 
-Node.js CI pipeline with Biome linting. Build, test, and Trivy scan are opt-in.
-
-**Always runs:** checkout, npm ci, Biome check
-
-**Optional:** build, tests, Trivy dependency scan
-
-#### Usage
+Node.js CI pipeline. Biome check on by default, everything else opt-in.
 
 ```yaml
 name: CI
@@ -25,30 +23,19 @@ jobs:
       run-tests: true
 ```
 
-#### Inputs
-
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
 | `node-version` | string | `"22"` | Node.js version |
+| `run-biome` | boolean | `true` | Run Biome lint and format check |
 | `run-build` | boolean | `false` | Run `npm run build` |
 | `run-tests` | boolean | `false` | Run `npm test` |
 | `run-trivy` | boolean | `false` | Run Trivy security scan |
 
-#### Requirements
-
-- `package-lock.json` (for `npm ci`)
-- Biome as a dev dependency (`@biomejs/biome`)
-- `biome.json` config file
+Requires: `package-lock.json`, Biome as dev dependency (unless `run-biome: false`).
 
 ### python-ci.yml
 
-Python CI pipeline with Ruff linting. Tests, mypy, and Trivy scan are opt-in.
-
-**Always runs:** checkout, pip install, Ruff check, Ruff format check
-
-**Optional:** pytest, mypy, Trivy dependency scan
-
-#### Usage
+Python CI pipeline. Ruff check on by default, everything else opt-in.
 
 ```yaml
 name: CI
@@ -62,8 +49,6 @@ jobs:
       run-mypy: true
 ```
 
-#### Inputs
-
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
 | `python-version` | string | `"3.12"` | Python version |
@@ -73,7 +58,70 @@ jobs:
 | `run-mypy` | boolean | `false` | Run `mypy .` |
 | `run-trivy` | boolean | `false` | Run Trivy security scan |
 
-#### Requirements
+Requires: `requirements.txt`. Ruff is installed automatically.
 
-- `requirements.txt` (or custom file via input)
-- Ruff is installed automatically (works with zero config)
+### deno-ci.yml
+
+Deno CI pipeline. Lint and format check on by default.
+
+```yaml
+name: CI
+on: [push, pull_request]
+jobs:
+  ci:
+    uses: voyagi/.github-workflows/.github/workflows/deno-ci.yml@main
+    with:
+      run-tests: true
+```
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `deno-version` | string | `"v2.x"` | Deno version |
+| `run-tests` | boolean | `false` | Run `deno test` |
+
+### dependency-review.yml
+
+Scans PRs for newly-introduced vulnerable dependencies. Works for npm and pip.
+
+```yaml
+name: Dependency Review
+on: [pull_request]
+jobs:
+  review:
+    uses: voyagi/.github-workflows/.github/workflows/dependency-review.yml@main
+```
+
+### stale.yml
+
+Marks and closes inactive issues. Does not touch PRs.
+
+```yaml
+name: Stale
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+jobs:
+  stale:
+    uses: voyagi/.github-workflows/.github/workflows/stale.yml@main
+```
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `days-before-stale` | number | `60` | Days before marking stale |
+| `days-before-close` | number | `7` | Days after stale before closing |
+
+### release.yml
+
+Creates a GitHub Release with auto-generated notes when a version tag is pushed.
+
+```yaml
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    uses: voyagi/.github-workflows/.github/workflows/release.yml@main
+```
