@@ -19,6 +19,10 @@ on:
         description: "Run Biome lint and format check"
         type: boolean
         default: true
+      run-knip:
+        description: "Run Knip dead code check"
+        type: boolean
+        default: false
       run-trivy:
         description: "Run Trivy dependency scan"
         type: boolean
@@ -49,6 +53,10 @@ jobs:
       - name: Test
         if: ${{ inputs.run-tests }}
         run: npm test
+
+      - name: Knip dead code check
+        if: ${{ inputs.run-knip }}
+        run: npx knip
 
       - name: Trivy security scan
         if: ${{ inputs.run-trivy }}
