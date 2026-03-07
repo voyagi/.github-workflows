@@ -1,0 +1,106 @@
+name: Auto-mirror new repos to Codeberg
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # Daily at 8 AM UTC
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find and mirror new repos
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          CODEBERG_USER: voyagi
+          GITHUB_USER: voyagi
+        run: |
+          set -euo pipefail
+
+          # List all GitHub repos (non-archived, non-fork)
+          gh_repos=$(gh repo list "$GITHUB_USER" --limit 100 --json name,visibility,isArchived,isFork,defaultBranchRef \
+            --jq '.[] | select(.isArchived == false and .isFork == false) | .name')
+
+          # List all Codeberg repos
+          cb_repos=$(curl -sf -H "Authorization: token $CODEBERG_TOKEN" \
+            "https://codeberg.org/api/v1/repos/search?owner=$CODEBERG_USER&limit=100" \
+            | jq -r '.data[].name // empty')
+
+          # Find repos on GitHub but not on Codeberg
+          new_repos=()
+          for repo in $gh_repos; do
+            if ! echo "$cb_repos" | grep -qx "$repo"; then
+              new_repos+=("$repo")
+            fi
+          done
+
+          if [ ${#new_repos[@]} -eq 0 ]; then
+            echo "All repos already mirrored. Nothing to do."
+            exit 0
+          fi
+
+          echo "Found ${#new_repos[@]} new repo(s) to mirror: ${new_repos[*]}"
+
+          for repo in "${new_repos[@]}"; do
+            echo "--- Migrating $repo ---"
+            visibility=$(gh repo view "$GITHUB_USER/$repo" --json visibility --jq '.visibility')
+            is_private=$( [ "$visibility" = "PRIVATE" ] && echo true || echo false )
+
+            # Create on Codeberg via migration API
+            migrate_body=$(jq -n \
+              --arg clone "https://github.com/$GITHUB_USER/$repo.git" \
+              --arg token "$GH_TOKEN" \
+              --arg name "$repo" \
+              --arg owner "$CODEBERG_USER" \
+              --argjson private "$is_private" \
+              '{clone_addr: $clone, auth_token: $token, mirror: false, private: $private, repo_name: $name, repo_owner: $owner, service: "github", wiki: false, issues: false, releases: true}')
+
+            status=$(curl -sf -o /dev/null -w "%{http_code}" \
+              -H "Authorization: token $CODEBERG_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$migrate_body" \
+              "https://codeberg.org/api/v1/repos/migrate") || true
+
+            if [ "$status" = "201" ]; then
+              echo "  Codeberg repo created"
+            else
+              echo "  Codeberg migration returned $status (may already exist)"
+            fi
+
+            # Add mirror workflow to GitHub repo if missing
+            existing=$(gh api "repos/$GITHUB_USER/$repo/contents/.github/workflows/mirror.yml" --jq '.sha' 2>/dev/null || echo "")
+            if [ -z "$existing" ]; then
+              branch=$(gh repo view "$GITHUB_USER/$repo" --json defaultBranchRef --jq '.defaultBranchRef.name')
+              content=$(base64 -w0 <<'WORKFLOW'
+          name: Mirror to Codeberg
+
+          on:
+            push:
+              branches: [main, master]
+
+          jobs:
+            mirror:
+              uses: voyagi/.github-workflows/.github/workflows/mirror-codeberg.yml@main
+              secrets:
+                CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          WORKFLOW
+              )
+              gh api "repos/$GITHUB_USER/$repo/contents/.github/workflows/mirror.yml" \
+                -X PUT \
+                -f message="ci: add Codeberg mirror workflow" \
+                -f content="$content" \
+                -f branch="$branch" > /dev/null
+              echo "  Workflow added (branch: $branch)"
+            else
+              echo "  Workflow already exists"
+            fi
+
+            # Set CODEBERG_TOKEN secret if not already set
+            gh secret set CODEBERG_TOKEN --repo "$GITHUB_USER/$repo" --body "$CODEBERG_TOKEN" 2>/dev/null || true
+            echo "  Secret set"
+
+            sleep 2
+          done
+
+          echo "Done. ${#new_repos[@]} repo(s) mirrored."
