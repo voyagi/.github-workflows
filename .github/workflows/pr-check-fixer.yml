@@ -1,0 +1,296 @@
+# Reusable workflow: auto-fixes simple CI failures, Discord-notifies for complex ones.
+# Deploy to: voyagi/.github-workflows/.github/workflows/pr-check-fixer.yml
+#
+# Anti-loop: skips if last commit starts with "fix(ci):" (case-insensitive).
+# Waits for all check suites to complete before acting (excludes own suite).
+# Concurrency group prevents parallel fixer runs on the same branch.
+
+name: PR Check Fixer
+
+on:
+  workflow_call:
+    inputs:
+      simple_error_patterns:
+        description: "Regex for auto-fixable check names (case-insensitive)"
+        type: string
+        default: "lint|biome|eslint|prettier|format|type.?check|tsc|build|compile"
+      max_turns:
+        description: "Max Claude turns for auto-fix"
+        type: number
+        default: 10
+      model:
+        description: "Claude model for auto-fix"
+        type: string
+        default: "claude-sonnet-4-6"
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false
+      DISCORD_WEBHOOK_URL:
+        required: true
+
+concurrency:
+  group: pr-fixer-${{ github.event.check_suite.head_branch }}
+  cancel-in-progress: true
+
+jobs:
+  fix-or-notify:
+    if: github.event.check_suite.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      actions: read
+
+    steps:
+      # PR lookup runs first so data is available for ALL notification paths
+      - name: Find associated PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.check_suite.head_branch }}
+          REPO: ${{ github.repository }}
+        run: |
+          PR=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open \
+            --json number,title,url --jq '.[0]') || {
+            echo "::error::Failed to query PRs"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::No open PR for branch $BRANCH"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "number=$(echo "$PR" | jq -r '.number')" >> "$GITHUB_OUTPUT"
+          echo "title=$(echo "$PR" | jq -r '.title')" >> "$GITHUB_OUTPUT"
+          echo "url=$(echo "$PR" | jq -r '.url')" >> "$GITHUB_OUTPUT"
+
+      - name: Anti-loop guard
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.check_suite.head_sha }}
+          BRANCH: ${{ github.event.check_suite.head_branch }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Skip pushes to default branch (no auto-fixing main)
+          DEFAULT=$(gh api "repos/$REPO" --jq '.default_branch') || {
+            echo "::error::Failed to query default branch"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          if [ "$BRANCH" = "$DEFAULT" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping - push to default branch"
+            exit 0
+          fi
+
+          # Skip if last commit was an auto-fix (prevents loops, case-insensitive)
+          COMMIT_MSG=$(gh api "repos/$REPO/commits/$SHA" --jq '.commit.message') || {
+            echo "::error::Failed to query commit message"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          if echo "$COMMIT_MSG" | grep -qi '^fix(ci):'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "already_fixed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping auto-fix - last commit was auto-fix"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "already_fixed=false" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for all check suites
+        if: steps.guard.outputs.skip != 'true'
+        id: suites
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.check_suite.head_sha }}
+          REPO: ${{ github.repository }}
+          SUITE_ID: ${{ github.event.check_suite.id }}
+        run: |
+          SUITES=$(gh api "repos/$REPO/commits/$SHA/check-suites" \
+            --jq '.check_suites') || {
+            echo "::error::Failed to query check suites"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          # Exclude own suite from pending count to avoid self-referential deadlock
+          PENDING=$(echo "$SUITES" | jq --argjson sid "$SUITE_ID" \
+            '[.[] | select(.status != "completed" and .id != $sid)] | length')
+
+          if [ "$PENDING" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$PENDING check suites still running, will re-trigger when done"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Check API key
+        id: apikey
+        env:
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No ANTHROPIC_API_KEY - auto-fix disabled, all failures go to Discord"
+          fi
+
+      - name: Categorize failures
+        if: >-
+          steps.guard.outputs.skip != 'true' &&
+          steps.suites.outputs.skip != 'true' &&
+          steps.pr.outputs.skip != 'true'
+        id: categorize
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.check_suite.head_sha }}
+          REPO: ${{ github.repository }}
+          PATTERN: ${{ inputs.simple_error_patterns }}
+        run: |
+          # Get all failed check runs for this commit (paginated)
+          FAILED=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate \
+            --jq '.check_runs[] | select(.conclusion == "failure") | {name: .name, id: .id}' \
+            | jq -s '.') || {
+            echo "::error::Failed to query check runs"
+            echo "simple_count=0" >> "$GITHUB_OUTPUT"
+            echo "complex_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          TOTAL=$(echo "$FAILED" | jq 'length')
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "::notice::No failed check runs found"
+            echo "simple_count=0" >> "$GITHUB_OUTPUT"
+            echo "complex_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Split into simple (auto-fixable) and complex (needs human)
+          SIMPLE=$(echo "$FAILED" | jq --arg pat "$PATTERN" \
+            '[.[] | select(.name | test($pat; "i"))]')
+          COMPLEX=$(echo "$FAILED" | jq --arg pat "$PATTERN" \
+            '[.[] | select(.name | test($pat; "i") | not)]')
+
+          echo "simple_count=$(echo "$SIMPLE" | jq 'length')" >> "$GITHUB_OUTPUT"
+          echo "complex_count=$(echo "$COMPLEX" | jq 'length')" >> "$GITHUB_OUTPUT"
+          echo "simple_names=$(echo "$SIMPLE" | jq -r '[.[].name] | join(", ")')" >> "$GITHUB_OUTPUT"
+          echo "complex_names=$(echo "$COMPLEX" | jq -r '[.[].name] | join(", ")')" >> "$GITHUB_OUTPUT"
+
+      # --- Auto-fix simple errors ---
+      - name: Checkout
+        if: >-
+          steps.apikey.outputs.available == 'true' &&
+          steps.guard.outputs.skip != 'true' &&
+          steps.suites.outputs.skip != 'true' &&
+          steps.pr.outputs.skip != 'true' &&
+          steps.categorize.outputs.simple_count > 0
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.check_suite.head_branch }}
+          fetch-depth: 0
+
+      - name: Auto-fix with Claude
+        if: >-
+          steps.apikey.outputs.available == 'true' &&
+          steps.guard.outputs.skip != 'true' &&
+          steps.suites.outputs.skip != 'true' &&
+          steps.pr.outputs.skip != 'true' &&
+          steps.categorize.outputs.simple_count > 0
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            CI checks failed on PR #${{ steps.pr.outputs.number }}.
+            Failed checks (auto-fixable): ${{ steps.categorize.outputs.simple_names }}
+
+            Steps:
+            1. Run `gh run list --commit ${{ github.event.check_suite.head_sha }} --json databaseId,name,conclusion --jq '.[] | select(.conclusion == "failure")'` to find failed run IDs.
+            2. Run `gh run view <id> --log-failed` for each to see error output.
+            3. Fix ONLY: lint errors, formatting, type errors, missing imports, typos.
+            4. Do NOT change test assertions, business logic, or API behavior.
+            5. Make minimal targeted fixes.
+            6. Commit with message starting with "fix(ci): " followed by what was fixed.
+          claude_args: "--max-turns ${{ inputs.max_turns }} --model ${{ inputs.model }}"
+
+      # --- Discord notifications ---
+      # Notify for complex errors, OR all errors when no API key
+      - name: Discord notify - failed checks
+        if: >-
+          steps.guard.outputs.skip != 'true' &&
+          steps.suites.outputs.skip != 'true' &&
+          steps.pr.outputs.skip != 'true' &&
+          (steps.categorize.outputs.complex_count > 0 ||
+           (steps.apikey.outputs.available != 'true' && steps.categorize.outputs.simple_count > 0))
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PR_TITLE: ${{ steps.pr.outputs.title }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          REPO: ${{ github.repository }}
+          COMPLEX_NAMES: ${{ steps.categorize.outputs.complex_names }}
+          SIMPLE_NAMES: ${{ steps.categorize.outputs.simple_names }}
+          HAS_KEY: ${{ steps.apikey.outputs.available }}
+        run: |
+          if [ "$HAS_KEY" = "true" ]; then
+            FAILED="$COMPLEX_NAMES"
+          else
+            # No API key: report all failures
+            ALL=""
+            [ -n "$SIMPLE_NAMES" ] && ALL="$SIMPLE_NAMES"
+            [ -n "$COMPLEX_NAMES" ] && { [ -n "$ALL" ] && ALL="$ALL, $COMPLEX_NAMES" || ALL="$COMPLEX_NAMES"; }
+            FAILED="$ALL"
+          fi
+          PAYLOAD=$(jq -n \
+            --arg title "$PR_TITLE" \
+            --arg repo "$REPO" \
+            --arg failed "$FAILED" \
+            --arg url "$PR_URL" \
+            '{content: "❌ **PR needs manual attention**\nPR: \($title)\nRepo: \($repo)\nFailed: \($failed)\n\($url)"}')
+          curl -sf --retry 2 -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" || echo "::warning::Discord notification failed"
+
+      - name: Discord notify - auto-fix failed
+        if: >-
+          steps.guard.outputs.already_fixed == 'true' &&
+          steps.pr.outputs.skip != 'true'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PR_TITLE: ${{ steps.pr.outputs.title }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          REPO: ${{ github.repository }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg title "$PR_TITLE" \
+            --arg repo "$REPO" \
+            --arg url "$PR_URL" \
+            '{content: "🔄 **Auto-fix didn'\''t resolve all issues - needs manual review**\nPR: \($title)\nRepo: \($repo)\n\($url)"}')
+          curl -sf --retry 2 -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" || echo "::warning::Discord notification failed"
+
+      - name: Discord notify - fixer failure
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PR_TITLE: ${{ steps.pr.outputs.title }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          REPO: ${{ github.repository }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg title "${PR_TITLE:-unknown}" \
+            --arg repo "$REPO" \
+            --arg url "${PR_URL:-}" \
+            '{content: "⚠️ **CI Fixer workflow failed**\nPR: \($title)\nRepo: \($repo)\n\($url)\nCheck Actions tab for details."}')
+          curl -sf --retry 2 -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" || echo "::warning::Discord notification failed (fixer fallback)"
