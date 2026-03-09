@@ -27,6 +27,7 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -47,11 +48,11 @@ jobs:
         if: ${{ inputs.run-lint }}
         uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.11.2
 
       - name: Trivy security scan
         if: ${{ inputs.run-trivy }}
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
           scan-ref: .
