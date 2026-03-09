@@ -17,7 +17,7 @@ on:
       max_turns:
         description: "Max Claude turns for auto-fix"
         type: number
-        default: 10
+        default: 15
       model:
         description: "Claude model for auto-fix"
         type: string
@@ -181,15 +181,37 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
             CI checks failed on PR #${{ steps.pr.outputs.number }}.
-            Failed checks (auto-fixable): ${{ steps.categorize.outputs.simple_names }}
+            Failed checks: ${{ steps.categorize.outputs.simple_names }}
 
-            Steps:
+            ## Phase 1: Diagnose
             1. Run `gh run list --commit ${{ github.event.workflow_run.head_sha }} --json databaseId,name,conclusion --jq '.[] | select(.conclusion == "failure")'` to find failed run IDs.
             2. Run `gh run view <id> --log-failed` for each to see error output.
-            3. Fix ONLY: lint errors, formatting, type errors, missing imports, typos.
-            4. Do NOT change test assertions, business logic, or API behavior.
-            5. Make minimal targeted fixes.
-            6. Commit with message starting with "fix(ci): " followed by what was fixed.
+            3. Identify the specific errors.
+
+            ## Phase 2: Check for recurring pattern
+            4. Run `git log --oneline --all --grep="fix(ci):" -20` to check for previous auto-fixes.
+            5. If similar errors were fixed before on this repo, this is a RECURRING issue.
+               Investigate the root cause:
+               - Missing or misconfigured linter config (biome.json, .eslintrc, ruff.toml)?
+               - Missing editor/formatter config (.editorconfig, .prettierrc)?
+               - Overly strict or wrong tsconfig.json settings?
+               - CI workflow checking for things this repo doesn't use?
+               - Missing pre-commit hook or CI setup that would prevent this class of error?
+
+            ## Phase 3: Fix
+            6. Fix the immediate errors (lint, format, type errors, missing imports).
+            7. If you found a root cause for recurring failures, fix that too:
+               - Update linter/formatter config to match the repo's actual patterns.
+               - Add or fix ignore rules for false positives.
+               - If a CI check is not valid for this repo (e.g. knip on a repo with no exports,
+                 typecheck on a JS-only repo), disable that specific check in the CI workflow
+                 by commenting it out or removing it, and note why in the commit message.
+            8. Do NOT change test assertions, business logic, or API behavior.
+            9. Do NOT disable checks that are legitimately catching real issues.
+
+            ## Phase 4: Commit
+            10. If you only fixed symptoms: commit with "fix(ci): <what was fixed>"
+            11. If you fixed root cause: commit with "fix(ci): <what was fixed> - prevent recurrence by <what you changed>"
           claude_args: "--max-turns ${{ inputs.max_turns }} --model ${{ inputs.model }}"
 
       # --- Discord notifications ---
