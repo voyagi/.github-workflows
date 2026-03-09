@@ -176,14 +176,14 @@ jobs:
           INFRA_ONLY: ${{ steps.logs.outputs.infra_only }}
           HAS_KEY: ${{ steps.apikey.outputs.available }}
         run: |
-          # Infrastructure-only failure → notify, don't fix
+          # Infrastructure-only failure - notify, don't fix
           if [ "$INFRA_ONLY" = "true" ]; then
             echo "action=notify_infra" >> "$GITHUB_OUTPUT"
             echo "attempts=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # No API key → notify
+          # No API key - notify
           if [ "$HAS_KEY" != "true" ]; then
             echo "action=notify_nokey" >> "$GITHUB_OUTPUT"
             echo "attempts=0" >> "$GITHUB_OUTPUT"
@@ -354,7 +354,7 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Discord notify
+      - name: Discord notify - gave up
         if: >-
           steps.pr.outputs.skip != 'true' &&
           steps.guard.outputs.action != 'fix'
@@ -393,19 +393,82 @@ jobs:
             -H "Content-Type: application/json" \
             -d "$PAYLOAD" || echo "::warning::Discord notification failed"
 
-      - name: Discord notify - fixer failure
-        if: failure()
+  # --- Success notification: PR ready to merge ---
+
+  notify-ready:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Find associated PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          REPO: ${{ github.repository }}
+        run: |
+          DEFAULT=$(gh api "repos/$REPO" --jq '.default_branch') || {
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          if [ "$BRANCH" = "$DEFAULT" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          PR=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open \
+            --json number,title,url --jq '.[0]') || {
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "title=$(echo "$PR" | jq -r '.title')" >> "$GITHUB_OUTPUT"
+          echo "url=$(echo "$PR" | jq -r '.url')" >> "$GITHUB_OUTPUT"
+
+      - name: Check if fixer was involved
+        id: fixer
+        if: steps.pr.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          MSG=$(gh api "repos/$REPO/commits/$SHA" --jq '.commit.message' 2>/dev/null || echo "")
+          if echo "$MSG" | grep -qi '^fix(ci):'; then
+            echo "fixed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fixed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Discord notify - ready to merge
+        if: steps.pr.outputs.skip != 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           PR_TITLE: ${{ steps.pr.outputs.title }}
           PR_URL: ${{ steps.pr.outputs.url }}
           REPO: ${{ github.repository }}
+          FIXED: ${{ steps.fixer.outputs.fixed }}
         run: |
+          if [ "$FIXED" = "true" ]; then
+            EMOJI="🔧✅"
+            MSG="CI fixed automatically - PR ready to merge"
+          else
+            EMOJI="✅"
+            MSG="CI passed - PR ready to merge"
+          fi
           PAYLOAD=$(jq -n \
-            --arg title "${PR_TITLE:-unknown}" \
-            --arg repo "$REPO" \
-            --arg url "${PR_URL:-}" \
-            '{content: "⚠️ **CI Fixer workflow failed**\nPR: \($title)\nRepo: \($repo)\n\($url)\nCheck Actions tab for details."}')
+            --arg emoji "$EMOJI" --arg msg "$MSG" \
+            --arg title "$PR_TITLE" --arg repo "$REPO" --arg url "$PR_URL" \
+            '{content: "\($emoji) **\($msg)**\n**PR:** \($title)\n**Repo:** \($repo)\n\($url)"}')
           curl -sf --retry 2 -X POST "$DISCORD_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD" || echo "::warning::Discord notification failed"
