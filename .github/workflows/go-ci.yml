@@ -1,0 +1,58 @@
+name: Go CI
+
+on:
+  workflow_call:
+    inputs:
+      go-version:
+        description: "Go version"
+        type: string
+        default: "1.26"
+      run-build:
+        description: "Run build step (go build ./...)"
+        type: boolean
+        default: true
+      run-tests:
+        description: "Run test suite (go test ./...)"
+        type: boolean
+        default: true
+      run-lint:
+        description: "Run golangci-lint"
+        type: boolean
+        default: true
+      run-trivy:
+        description: "Run Trivy dependency scan"
+        type: boolean
+        default: false
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+
+      - name: Build
+        if: ${{ inputs.run-build }}
+        run: go build ./...
+
+      - name: Test
+        if: ${{ inputs.run-tests }}
+        run: go test ./...
+
+      - name: Lint
+        if: ${{ inputs.run-lint }}
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+
+      - name: Trivy security scan
+        if: ${{ inputs.run-trivy }}
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
