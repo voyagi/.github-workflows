@@ -206,7 +206,6 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           show_full_output: true
-          settings: '{"permissions":{"allow":["Edit","Read","Write","MultiEdit","Glob","Grep","Bash"]}}'
           prompt: |
             CI checks failed on PR #${{ steps.pr.outputs.number }}.
             Failed checks: ${{ steps.categorize.outputs.simple_names }}
@@ -226,7 +225,7 @@ jobs:
               fix the config to match the project's actual patterns.
             - If a CI check is invalid for this repo, you may disable that specific
               check in the CI workflow and explain why in a comment.
-          claude_args: "--max-turns ${{ inputs.max_turns }} --model ${{ inputs.model }}"
+          claude_args: '--allowedTools "Edit,Read,Write,MultiEdit,Glob,Grep,Bash" --max-turns ${{ inputs.max_turns }} --model ${{ inputs.model }}'
 
       # --- Diagnose complex failures ---
       - name: Diagnose failures for Discord
