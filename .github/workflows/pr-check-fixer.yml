@@ -224,7 +224,10 @@ jobs:
               fix the config to match the project's actual patterns.
             - If a CI check is invalid for this repo, you may disable that specific
               check in the CI workflow and explain why in a comment.
-          claude_args: "--max-turns ${{ inputs.max_turns }} --model ${{ inputs.model }}"
+          claude_args: |
+            --max-turns ${{ inputs.max_turns }}
+            --model ${{ inputs.model }}
+            --allowedTools "Edit,Read,Write,MultiEdit,Glob,Grep,Bash"
 
       # --- Diagnose complex failures ---
       - name: Diagnose failures for Discord
