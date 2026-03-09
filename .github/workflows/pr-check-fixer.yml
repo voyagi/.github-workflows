@@ -17,7 +17,7 @@ on:
       max_turns:
         description: "Max Claude turns for auto-fix"
         type: number
-        default: 30
+        default: 15
       model:
         description: "Claude model for auto-fix"
         type: string
@@ -171,6 +171,31 @@ jobs:
           ref: ${{ github.event.workflow_run.head_branch }}
           fetch-depth: 0
 
+      - name: Collect error logs for Claude
+        if: >-
+          steps.apikey.outputs.available == 'true' &&
+          steps.guard.outputs.skip != 'true' &&
+          steps.pr.outputs.skip != 'true' &&
+          steps.categorize.outputs.simple_count > 0
+        id: errorlogs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          LOGS=""
+          for RUN_ID in $(gh run list --commit "$SHA" --repo "$REPO" \
+            --json databaseId,conclusion --jq '.[] | select(.conclusion == "failure") | .databaseId'); do
+            LOG=$(gh run view "$RUN_ID" --repo "$REPO" --log-failed 2>&1 | tail -80)
+            LOGS=$(printf '%s\n--- Run %s ---\n%s' "$LOGS" "$RUN_ID" "$LOG")
+          done
+          LOGS=$(echo "$LOGS" | head -200)
+          {
+            echo "logs<<ERROR_LOGS_EOF"
+            echo "$LOGS"
+            echo "ERROR_LOGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Auto-fix with Claude
         if: >-
           steps.apikey.outputs.available == 'true' &&
@@ -184,35 +209,21 @@ jobs:
             CI checks failed on PR #${{ steps.pr.outputs.number }}.
             Failed checks: ${{ steps.categorize.outputs.simple_names }}
 
-            ## Phase 1: Diagnose
-            1. Run `gh run list --commit ${{ github.event.workflow_run.head_sha }} --json databaseId,name,conclusion --jq '.[] | select(.conclusion == "failure")'` to find failed run IDs.
-            2. Run `gh run view <id> --log-failed` for each to see error output.
-            3. Identify the specific errors.
+            Error logs from the failed CI run:
+            ```
+            ${{ steps.errorlogs.outputs.logs }}
+            ```
 
-            ## Phase 2: Check for recurring pattern
-            4. Run `git log --oneline --all --grep="fix(ci):" -20` to check for previous auto-fixes.
-            5. If similar errors were fixed before on this repo, this is a RECURRING issue.
-               Investigate the root cause:
-               - Missing or misconfigured linter config (biome.json, .eslintrc, ruff.toml)?
-               - Missing editor/formatter config (.editorconfig, .prettierrc)?
-               - Overly strict or wrong tsconfig.json settings?
-               - CI workflow checking for things this repo doesn't use?
-               - Missing pre-commit hook or CI setup that would prevent this class of error?
+            Fix the errors shown above. Read the relevant source files, identify the
+            issues, and edit them to resolve the lint, format, type, or build errors.
 
-            ## Phase 3: Fix
-            6. Fix the immediate errors (lint, format, type errors, missing imports).
-            7. If you found a root cause for recurring failures, fix that too:
-               - Update linter/formatter config to match the repo's actual patterns.
-               - Add or fix ignore rules for false positives.
-               - If a CI check is not valid for this repo (e.g. knip on a repo with no exports,
-                 typecheck on a JS-only repo), disable that specific check in the CI workflow
-                 by commenting it out or removing it, and note why in the commit message.
-            8. Do NOT change test assertions, business logic, or API behavior.
-            9. Do NOT disable checks that are legitimately catching real issues.
-
-            ## Phase 4: Commit
-            10. If you only fixed symptoms: commit with "fix(ci): <what was fixed>"
-            11. If you fixed root cause: commit with "fix(ci): <what was fixed> - prevent recurrence by <what you changed>"
+            Rules:
+            - Do NOT change test assertions, business logic, or API behavior.
+            - Do NOT disable checks that legitimately catch real issues.
+            - If a linter/formatter config is misconfigured (e.g. wrong indent style),
+              fix the config to match the project's actual patterns.
+            - If a CI check is invalid for this repo, you may disable that specific
+              check in the CI workflow and explain why in a comment.
           claude_args: "--max-turns ${{ inputs.max_turns }} --model ${{ inputs.model }}"
 
       # --- Diagnose complex failures ---
