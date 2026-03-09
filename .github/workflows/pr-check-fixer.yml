@@ -13,7 +13,7 @@ on:
       simple_error_patterns:
         description: "Regex for auto-fixable check names (case-insensitive)"
         type: string
-        default: "lint|biome|eslint|prettier|format|type.?check|tsc|build|compile"
+        default: "lint|biome|eslint|prettier|format|type.?check|tsc|build|compile|^ci"
       max_turns:
         description: "Max Claude turns for auto-fix"
         type: number
