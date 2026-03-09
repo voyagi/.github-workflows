@@ -214,38 +214,120 @@ jobs:
             11. If you fixed root cause: commit with "fix(ci): <what was fixed> - prevent recurrence by <what you changed>"
           claude_args: "--max-turns ${{ inputs.max_turns }} --model ${{ inputs.model }}"
 
-      # --- Discord notifications ---
-      # Notify for complex errors, OR all errors when no API key
-      - name: Discord notify - failed checks
+      # --- Diagnose complex failures ---
+      - name: Diagnose failures for Discord
         if: >-
           steps.guard.outputs.skip != 'true' &&
           steps.pr.outputs.skip != 'true' &&
           (steps.categorize.outputs.complex_count > 0 ||
            (steps.apikey.outputs.available != 'true' && steps.categorize.outputs.simple_count > 0))
+        id: diagnose
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          PR_TITLE: ${{ steps.pr.outputs.title }}
-          PR_URL: ${{ steps.pr.outputs.url }}
+          GH_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          HAS_KEY: ${{ steps.apikey.outputs.available }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
           REPO: ${{ github.repository }}
           COMPLEX_NAMES: ${{ steps.categorize.outputs.complex_names }}
           SIMPLE_NAMES: ${{ steps.categorize.outputs.simple_names }}
-          HAS_KEY: ${{ steps.apikey.outputs.available }}
+          MODEL: ${{ inputs.model }}
         run: |
+          # Determine which failures to report
           if [ "$HAS_KEY" = "true" ]; then
             FAILED="$COMPLEX_NAMES"
           else
-            # No API key: report all failures
             ALL=""
             [ -n "$SIMPLE_NAMES" ] && ALL="$SIMPLE_NAMES"
             [ -n "$COMPLEX_NAMES" ] && { [ -n "$ALL" ] && ALL="$ALL, $COMPLEX_NAMES" || ALL="$COMPLEX_NAMES"; }
             FAILED="$ALL"
           fi
-          PAYLOAD=$(jq -n \
-            --arg title "$PR_TITLE" \
-            --arg repo "$REPO" \
-            --arg failed "$FAILED" \
-            --arg url "$PR_URL" \
-            '{content: "❌ **PR needs manual attention**\nPR: \($title)\nRepo: \($repo)\nFailed: \($failed)\n\($url)"}')
+          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
+
+          # Collect error logs from failed runs
+          LOGS=""
+          for RUN_ID in $(gh run list --commit "$SHA" --repo "$REPO" \
+            --json databaseId,conclusion --jq '.[] | select(.conclusion == "failure") | .databaseId'); do
+            LOG=$(gh run view "$RUN_ID" --repo "$REPO" --log-failed 2>&1 | tail -50)
+            LOGS=$(printf '%s\n--- Run %s ---\n%s' "$LOGS" "$RUN_ID" "$LOG")
+          done
+          LOGS=$(echo "$LOGS" | head -150)
+
+          # If API key available, get Claude's diagnosis
+          if [ "$HAS_KEY" = "true" ] && [ -n "$ANTHROPIC_API_KEY" ]; then
+            ANALYSIS=$(jq -n \
+              --arg failed "$FAILED" \
+              --arg logs "$LOGS" \
+              --arg model "$MODEL" \
+              '{
+                model: $model,
+                max_tokens: 600,
+                messages: [{
+                  role: "user",
+                  content: ("CI checks failed. Checks: " + $failed + "\n\nError logs:\n" + $logs + "\n\nProvide a concise diagnosis (under 1000 chars):\n1. What failed and why (be specific)\n2. Is this likely recurring? What is the root cause?\n3. Recommended fix (exact commands or file changes)\n\nNo markdown headers. Be direct and actionable.")
+                }]
+              }' | curl -sf https://api.anthropic.com/v1/messages \
+              -H "Content-Type: application/json" \
+              -H "x-api-key: $ANTHROPIC_API_KEY" \
+              -H "anthropic-version: 2023-06-01" \
+              -d @- | jq -r '.content[0].text // "Analysis unavailable"') || ANALYSIS=""
+
+            if [ -n "$ANALYSIS" ]; then
+              ANALYSIS="${ANALYSIS:0:1200}"
+              echo "has_analysis=true" >> "$GITHUB_OUTPUT"
+              {
+                echo "analysis<<ANALYSIS_EOF"
+                echo "$ANALYSIS"
+                echo "ANALYSIS_EOF"
+              } >> "$GITHUB_OUTPUT"
+            else
+              echo "has_analysis=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            # No API key: include raw error snippet
+            SNIPPET=$(echo "$LOGS" | grep -i "error\|fail\|exception" | head -10)
+            if [ -n "$SNIPPET" ]; then
+              SNIPPET="${SNIPPET:0:800}"
+              echo "has_analysis=true" >> "$GITHUB_OUTPUT"
+              {
+                echo "analysis<<ANALYSIS_EOF"
+                echo "$SNIPPET"
+                echo "ANALYSIS_EOF"
+              } >> "$GITHUB_OUTPUT"
+            else
+              echo "has_analysis=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      # --- Discord notifications ---
+      - name: Discord notify - failed checks
+        if: >-
+          steps.diagnose.outcome == 'success' &&
+          steps.diagnose.outputs.failed != ''
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PR_TITLE: ${{ steps.pr.outputs.title }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          REPO: ${{ github.repository }}
+          FAILED: ${{ steps.diagnose.outputs.failed }}
+          HAS_ANALYSIS: ${{ steps.diagnose.outputs.has_analysis }}
+          ANALYSIS: ${{ steps.diagnose.outputs.analysis }}
+        run: |
+          if [ "$HAS_ANALYSIS" = "true" ] && [ -n "$ANALYSIS" ]; then
+            PAYLOAD=$(jq -n \
+              --arg title "$PR_TITLE" \
+              --arg repo "$REPO" \
+              --arg failed "$FAILED" \
+              --arg url "$PR_URL" \
+              --arg analysis "$ANALYSIS" \
+              '{content: "❌ **PR needs attention**\n**PR:** \($title)\n**Repo:** \($repo)\n**Failed:** \($failed)\n\($url)\n\n**Diagnosis:**\n\($analysis)"}')
+          else
+            PAYLOAD=$(jq -n \
+              --arg title "$PR_TITLE" \
+              --arg repo "$REPO" \
+              --arg failed "$FAILED" \
+              --arg url "$PR_URL" \
+              '{content: "❌ **PR needs attention**\n**PR:** \($title)\n**Repo:** \($repo)\n**Failed:** \($failed)\n\($url)"}')
+          fi
           curl -sf --retry 2 -X POST "$DISCORD_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD" || echo "::warning::Discord notification failed"
