@@ -91,17 +91,31 @@ jobs:
             exit 0
           fi
 
-          # Skip if last commit was an auto-fix (prevents loops, case-insensitive)
-          COMMIT_MSG=$(gh api "repos/$REPO/commits/$SHA" --jq '.commit.message') || {
-            echo "::error::Failed to query commit message"
+          # Skip if last 2 consecutive commits were auto-fixes (prevents loops).
+          # Allows one retry so Claude can learn from a failed first attempt.
+          MSGS=$(gh api "repos/$REPO/commits?sha=$BRANCH&per_page=2" \
+            --jq '.[].commit.message') || {
+            echo "::error::Failed to query commits"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           }
-          if echo "$COMMIT_MSG" | grep -qi '^fix(ci):'; then
+          FIX_COUNT=0
+          while IFS= read -r msg; do
+            if echo "$msg" | grep -qi '^fix(ci):'; then
+              FIX_COUNT=$((FIX_COUNT + 1))
+            else
+              break
+            fi
+          done <<< "$MSGS"
+          if [ "$FIX_COUNT" -ge 2 ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "already_fixed=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Skipping auto-fix - last commit was auto-fix"
+            echo "::notice::Skipping - 2 consecutive auto-fix attempts already"
             exit 0
+          fi
+          if [ "$FIX_COUNT" -eq 1 ]; then
+            echo "::notice::Retry attempt - previous auto-fix didn't resolve all issues"
+            echo "is_retry=true" >> "$GITHUB_OUTPUT"
           fi
 
           echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -215,7 +229,7 @@ jobs:
             ${{ steps.errorlogs.outputs.logs }}
             ```
 
-            Fix the errors shown above. Read the relevant source files, identify the
+            ${{ steps.guard.outputs.is_retry == 'true' && 'IMPORTANT: A previous auto-fix attempt did NOT resolve all CI errors. Run `git log --oneline -3` and `git diff HEAD~1` to see what was already tried. The error logs above show what STILL fails after that attempt. Do NOT repeat the same fix - find what the previous attempt got wrong and fix it properly.' || 'Fix the errors shown above.' }} Read the relevant source files, identify the
             issues, and edit them to resolve the lint, format, type, or build errors.
 
             Rules:
