@@ -225,6 +225,8 @@ jobs:
               fix the config to match the project's actual patterns.
             - If a CI check is invalid for this repo, you may disable that specific
               check in the CI workflow and explain why in a comment.
+            - After making all fixes, commit and push:
+              git add -A && git commit -m "fix(ci): auto-fix lint/format/type errors" && git push
           claude_args: '--allowedTools "Edit,Read,Write,MultiEdit,Glob,Grep,Bash" --max-turns ${{ inputs.max_turns }} --model ${{ inputs.model }}'
 
       # --- Diagnose complex failures ---
