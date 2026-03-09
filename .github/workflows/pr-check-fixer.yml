@@ -42,6 +42,7 @@ jobs:
       pull-requests: write
       checks: read
       actions: read
+      id-token: write
 
     steps:
       # PR lookup runs first so data is available for ALL notification paths
