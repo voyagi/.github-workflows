@@ -27,6 +27,11 @@ on:
         description: "Run Trivy dependency scan"
         type: boolean
         default: false
+    secrets:
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
 
 jobs:
   ci:
@@ -43,25 +48,69 @@ jobs:
       - run: npm ci
 
       - name: Biome check
+        id: biome
         if: ${{ inputs.run-biome }}
+        continue-on-error: true
         run: npx biome check .
 
       - name: Build
+        id: build
         if: ${{ inputs.run-build }}
+        continue-on-error: true
         run: npm run build
 
       - name: Test
+        id: test
         if: ${{ inputs.run-tests }}
+        continue-on-error: true
         run: npm test
 
       - name: Knip dead code check
+        id: knip
         if: ${{ inputs.run-knip }}
+        continue-on-error: true
         run: npx knip
 
       - name: Trivy security scan
+        id: trivy
         if: ${{ inputs.run-trivy }}
+        continue-on-error: true
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
           scan-ref: .
           severity: HIGH,CRITICAL
+
+      - name: Notify on failure
+        if: |
+          (steps.biome.outcome == 'failure' || steps.build.outcome == 'failure' ||
+           steps.test.outcome == 'failure' || steps.knip.outcome == 'failure' ||
+           steps.trivy.outcome == 'failure')
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          FAILED=""
+          [ "${{ steps.biome.outcome }}" = "failure" ] && FAILED="${FAILED}biome, "
+          [ "${{ steps.build.outcome }}" = "failure" ] && FAILED="${FAILED}build, "
+          [ "${{ steps.test.outcome }}" = "failure" ] && FAILED="${FAILED}test, "
+          [ "${{ steps.knip.outcome }}" = "failure" ] && FAILED="${FAILED}knip, "
+          [ "${{ steps.trivy.outcome }}" = "failure" ] && FAILED="${FAILED}trivy, "
+          FAILED="${FAILED%, }"
+          MSG="CI FAILED [${{ github.repository }}]: ${FAILED}
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="${MSG}" \
+              -d disable_web_page_preview=true || true
+          fi
+
+      - name: Fail if any step failed
+        if: |
+          steps.biome.outcome == 'failure' || steps.build.outcome == 'failure' ||
+          steps.test.outcome == 'failure' || steps.knip.outcome == 'failure' ||
+          steps.trivy.outcome == 'failure'
+        run: |
+          echo "::error::One or more CI steps failed"
+          exit 1
