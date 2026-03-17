@@ -32,6 +32,8 @@ on:
         required: false
       TELEGRAM_CHAT_ID:
         required: false
+      DISCORD_WEBHOOK_URL:
+        required: false
 
 jobs:
   ci:
@@ -82,13 +84,16 @@ jobs:
           severity: HIGH,CRITICAL
 
       - name: Notify on failure
+        id: notify
         if: |
           (steps.biome.outcome == 'failure' || steps.build.outcome == 'failure' ||
            steps.test.outcome == 'failure' || steps.knip.outcome == 'failure' ||
            steps.trivy.outcome == 'failure')
+        continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           FAILED=""
           [ "${{ steps.biome.outcome }}" = "failure" ] && FAILED="${FAILED}biome, "
@@ -99,11 +104,26 @@ jobs:
           FAILED="${FAILED%, }"
           MSG="CI FAILED [${{ github.repository }}]: ${FAILED}
           Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          SENT=false
+
+          # Try Telegram first
           if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -d chat_id="${TELEGRAM_CHAT_ID}" \
               -d text="${MSG}" \
-              -d disable_web_page_preview=true || true
+              -d disable_web_page_preview=true)
+            [ "$HTTP_CODE" = "200" ] && SENT=true
+            [ "$SENT" = "false" ] && echo "::warning::Telegram failed (HTTP $HTTP_CODE)"
+          fi
+
+          # Discord fallback if Telegram failed or unconfigured
+          if [ "$SENT" = "false" ] && [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            curl -s -X POST "$DISCORD_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "{\"content\":\"[Telegram down] ${MSG}\",\"username\":\"Watchtower\"}" || true
+            echo "::notice::Sent via Discord (Telegram fallback)"
           fi
 
       - name: Fail if any step failed
